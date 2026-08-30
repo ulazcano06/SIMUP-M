@@ -51,17 +51,66 @@ def actualizar_datos_reales(url_efipem=""):
 
 def cargar_archivo_efipem(file):
     if file is None:
-        raise gr.Error("Selecciona un archivo EFIPEM CSV o ZIP.")
-    coneval, src_c = descargar_coneval(force=False)
-    efipem = cargar_efipem_desde_archivo(file)
-    base = construir_base_maestra(efipem, coneval)
-    base["__modo__"] = "REAL"
-    base.to_csv(DATA_DIR / "base_maestra_hidalgo.csv", index=False, encoding="utf-8-sig")
-    STATE["base"] = base
-    STATE["modo"] = "DATOS OFICIALES"
-    STATE["fuentes"] = f"{src_c} | EFIPEM cargado manualmente: {Path(file).name}"
-    STATE["modelo"] = None
-    return _status(), base.head(50), gr.update(choices=sorted(base["municipio"].dropna().unique()), value="Zimapán")
+        raise gr.Error("Selecciona un archivo CSV, XLSX o ZIP.")
+
+    p = Path(file)
+
+    # SIMUP-M 1.1: si el archivo ya es una base maestra municipio-año,
+    # se carga directamente y NO depende de una descarga externa de CONEVAL.
+    try:
+        if p.suffix.lower() == ".csv":
+            base_directa = pd.read_csv(p, encoding="utf-8-sig")
+        elif p.suffix.lower() in [".xlsx", ".xls"]:
+            base_directa = pd.read_excel(p)
+        else:
+            base_directa = None
+
+        if base_directa is not None:
+            base_directa.columns = [
+                str(c).strip().lower().replace(" ", "_")
+                for c in base_directa.columns
+            ]
+            if {"municipio", "anio"}.issubset(base_directa.columns):
+                base_directa["anio"] = pd.to_numeric(base_directa["anio"], errors="coerce")
+                base_directa = base_directa.dropna(subset=["municipio", "anio"]).copy()
+                base_directa["anio"] = base_directa["anio"].astype(int)
+
+                if "__modo__" not in base_directa.columns:
+                    base_directa["__modo__"] = "REAL"
+
+                base_directa.to_csv(
+                    DATA_DIR / "base_maestra_hidalgo.csv",
+                    index=False,
+                    encoding="utf-8-sig"
+                )
+                STATE["base"] = base_directa
+                STATE["modo"] = "DATOS OFICIALES — BASE MAESTRA LOCAL"
+                STATE["fuentes"] = f"Base local cargada: {p.name}"
+                STATE["modelo"] = None
+
+                municipios = sorted(base_directa["municipio"].dropna().astype(str).unique())
+                valor = "Zimapán" if "Zimapán" in municipios else (municipios[0] if municipios else None)
+                return _status(), base_directa.head(50), gr.update(choices=municipios, value=valor)
+    except Exception as e:
+        # Si no es base maestra, intentamos el flujo EFIPEM original.
+        pass
+
+    # Flujo original para CSV/ZIP oficial EFIPEM.
+    try:
+        coneval, src_c = descargar_coneval(force=False)
+        efipem = cargar_efipem_desde_archivo(file)
+        base = construir_base_maestra(efipem, coneval)
+        base["__modo__"] = "REAL"
+        base.to_csv(DATA_DIR / "base_maestra_hidalgo.csv", index=False, encoding="utf-8-sig")
+        STATE["base"] = base
+        STATE["modo"] = "DATOS OFICIALES"
+        STATE["fuentes"] = f"{src_c} | EFIPEM cargado manualmente: {p.name}"
+        STATE["modelo"] = None
+        municipios = sorted(base["municipio"].dropna().unique())
+        valor = "Zimapán" if "Zimapán" in municipios else (municipios[0] if municipios else None)
+        return _status(), base.head(50), gr.update(choices=municipios, value=valor)
+    except Exception as e:
+        raise gr.Error(f"No fue posible cargar el archivo: {e}")
 
 def cargar_cache():
     p = DATA_DIR / "base_maestra_hidalgo.csv"
@@ -85,6 +134,8 @@ def tabla_filtrada(municipio):
         "ingresos_propios","transferencias_total","gasto_total_calc",
         "g_servicios_personales_pct","g_servicios_generales_pct",
         "g_inversion_publica_pct","pobreza_pct","pobreza_extrema_pct",
+        "pobreza_extrema_personas","fismdf","asignacion_pobreza_2020",
+        "asignacion_eficacia_2020","carencia_alimentacion_pct",
         "carencia_servicios_basicos_pct","rezago_educativo_pct","__modo__"
     ] if c in d.columns]
     return d[cols].sort_values("anio", ascending=False)
@@ -253,9 +304,9 @@ with gr.Blocks(title=APP_TITLE) as demo:
             btn_demo = gr.Button("Modo demo sintético")
         url_efipem = gr.Textbox(label="URL directa EFIPEM (opcional)",
                                 placeholder="Déjala vacía para intentar autodetección desde INEGI")
-        upload = gr.File(label="O carga manualmente el CSV/ZIP oficial de EFIPEM",
+        upload = gr.File(label="Carga una base SIMUP-M CSV/XLSX o un CSV/ZIP oficial EFIPEM",
                          file_types=[".csv",".zip",".xlsx"])
-        btn_upload = gr.Button("Construir base con archivo cargado")
+        btn_upload = gr.Button("Cargar archivo")
         tabla_datos = gr.Dataframe(label="Vista previa", interactive=False, wrap=True)
         gr.Markdown("""
 **Fuentes principales**
@@ -353,7 +404,6 @@ Una asociación entre inversión pública y pobreza no significa que modificar e
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-
     demo.launch(
         server_name="0.0.0.0",
         server_port=port,
