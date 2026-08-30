@@ -352,4 +352,10 @@ Una asociación entre inversión pública y pobreza no significa que modificar e
     btn_scatter.click(scatter_global, inputs=[xvar,yvar], outputs=[scatter])
 
 if __name__ == "__main__":
-    demo.launch(css=CSS)
+    port = int(os.environ.get("PORT", 10000))
+
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        css=CSS
+    )
