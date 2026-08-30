@@ -35,19 +35,169 @@ def cargar_demo():
     return _status(), STATE["base"].head(25), gr.update(choices=sorted(STATE["base"]["municipio"].unique()), value="Zimapán")
 
 def actualizar_datos_reales(url_efipem=""):
-    msgs = []
-    coneval, src_c = descargar_coneval(force=True)
-    msgs.append(src_c)
-    efipem, src_e = descargar_efipem(force=True, url_directa=url_efipem.strip() or None)
-    msgs.append(src_e)
-    base = construir_base_maestra(efipem, coneval)
-    base["__modo__"] = "REAL"
-    base.to_csv(DATA_DIR / "base_maestra_hidalgo.csv", index=False, encoding="utf-8-sig")
-    STATE["base"] = base
-    STATE["modo"] = "DATOS OFICIALES"
-    STATE["fuentes"] = " | ".join(msgs)
-    STATE["modelo"] = None
-    return _status(), base.head(50), gr.update(choices=sorted(base["municipio"].dropna().unique()), value="Zimapán")
+    """
+    Actualización robusta de fuentes oficiales.
+
+    1) Intenta refrescar CONEVAL.
+    2) Intenta refrescar EFIPEM desde URL directa o autodetección.
+    3) Si EFIPEM no puede descargarse automáticamente, NO destruye la base:
+       conserva la información financiera/local y actualiza CONEVAL cuando sea posible.
+    """
+    mensajes = []
+    errores = []
+
+    # ---------- CONEVAL ----------
+    coneval = None
+    try:
+        coneval, src_c = descargar_coneval(force=True)
+        mensajes.append(f"✅ CONEVAL actualizado: {src_c}")
+    except Exception as e:
+        errores.append(f"CONEVAL: {type(e).__name__}: {e}")
+        # Intentar caché existente de CONEVAL
+        p_coneval = DATA_DIR / "coneval_municipal_hidalgo.csv"
+        if p_coneval.exists():
+            try:
+                coneval = pd.read_csv(p_coneval)
+                mensajes.append("⚠️ CONEVAL: se usó el caché local porque la descarga no respondió.")
+            except Exception:
+                coneval = None
+
+    # ---------- INEGI EFIPEM ----------
+    efipem = None
+    try:
+        efipem, src_e = descargar_efipem(
+            force=True,
+            url_directa=(url_efipem or "").strip() or None
+        )
+        mensajes.append(f"✅ INEGI EFIPEM actualizado: {src_e}")
+    except Exception as e:
+        errores.append(f"INEGI EFIPEM: {type(e).__name__}: {e}")
+
+        # Si ya existe un caché EFIPEM válido, aprovecharlo.
+        p_efi = DATA_DIR / "efipem_hidalgo.csv"
+        if p_efi.exists():
+            try:
+                efipem = pd.read_csv(p_efi)
+                mensajes.append("⚠️ INEGI EFIPEM: se usó el caché local porque no fue posible descargarlo.")
+            except Exception:
+                efipem = None
+
+    # ---------- Caso A: tenemos EFIPEM ----------
+    if efipem is not None:
+        try:
+            if coneval is None:
+                # Si CONEVAL no respondió, usamos una tabla social vacía para no perder EFIPEM.
+                coneval = pd.DataFrame(columns=["municipio", "anio"])
+
+            base = construir_base_maestra(efipem, coneval)
+            if base.empty:
+                raise ValueError("La integración de EFIPEM produjo una base vacía.")
+
+            base["__modo__"] = "REAL"
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            base.to_csv(
+                DATA_DIR / "base_maestra_hidalgo.csv",
+                index=False,
+                encoding="utf-8-sig"
+            )
+
+            STATE["base"] = base
+            STATE["modo"] = "DATOS OFICIALES — ACTUALIZACIÓN COMPLETA"
+            STATE["fuentes"] = " | ".join(mensajes)
+            STATE["modelo"] = None
+
+            municipios = sorted(base["municipio"].dropna().astype(str).unique().tolist())
+            valor = "Zimapán" if "Zimapán" in municipios else (municipios[0] if municipios else None)
+
+            return (
+                _status(),
+                base.head(50),
+                gr.update(choices=municipios, value=valor)
+            )
+        except Exception as e:
+            errores.append(f"Integración EFIPEM+CONEVAL: {type(e).__name__}: {e}")
+
+    # ---------- Caso B: EFIPEM no disponible, pero existe una base ya cargada ----------
+    base_existente = None
+    if STATE["base"] is not None and len(STATE["base"]) > 0:
+        base_existente = STATE["base"].copy()
+    else:
+        p_base = DATA_DIR / "base_maestra_hidalgo.csv"
+        if p_base.exists():
+            try:
+                base_existente = pd.read_csv(p_base)
+            except Exception:
+                base_existente = None
+
+    if base_existente is not None and not base_existente.empty:
+        base = base_existente.copy()
+
+        # Refrescar únicamente las columnas sociales oficiales de CONEVAL.
+        if coneval is not None and not coneval.empty and {"municipio", "anio"}.issubset(coneval.columns):
+            coneval2 = coneval.copy()
+            coneval2["municipio"] = coneval2["municipio"].astype(str).str.strip()
+            coneval2["anio"] = pd.to_numeric(coneval2["anio"], errors="coerce")
+            coneval2 = coneval2.dropna(subset=["municipio", "anio"]).copy()
+            coneval2["anio"] = coneval2["anio"].astype(int)
+
+            base["municipio"] = base["municipio"].astype(str).str.strip()
+            base["anio"] = pd.to_numeric(base["anio"], errors="coerce")
+            base = base.dropna(subset=["municipio", "anio"]).copy()
+            base["anio"] = base["anio"].astype(int)
+
+            claves = ["municipio", "anio"]
+            sociales = [c for c in coneval2.columns if c not in claves]
+
+            # Quitar del lado izquierdo las versiones anteriores para que
+            # los valores recién descargados sean los que prevalezcan.
+            quitar = [c for c in sociales if c in base.columns]
+            if quitar:
+                base = base.drop(columns=quitar)
+
+            base = base.merge(
+                coneval2[claves + sociales].drop_duplicates(claves),
+                on=claves,
+                how="left"
+            )
+
+            mensajes.append("✅ Indicadores sociales CONEVAL integrados a la base ya cargada.")
+
+        if "__modo__" not in base.columns:
+            base["__modo__"] = "REAL"
+
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        base.to_csv(
+            DATA_DIR / "base_maestra_hidalgo.csv",
+            index=False,
+            encoding="utf-8-sig"
+        )
+
+        STATE["base"] = base
+        STATE["modo"] = "DATOS OFICIALES — ACTUALIZACIÓN PARCIAL"
+        detalle = " | ".join(mensajes)
+        if errores:
+            detalle += " | ⚠️ " + " || ".join(errores)
+        STATE["fuentes"] = detalle
+        STATE["modelo"] = None
+
+        municipios = sorted(base["municipio"].dropna().astype(str).unique().tolist())
+        valor = "Zimapán" if "Zimapán" in municipios else (municipios[0] if municipios else None)
+
+        # No lanzamos Error: conservamos la base y explicamos exactamente
+        # qué fuente pudo actualizarse y cuál no.
+        return (
+            _status(),
+            base.head(50),
+            gr.update(choices=municipios, value=valor)
+        )
+
+    # ---------- Caso C: no hay datos aprovechables ----------
+    detalle = " || ".join(errores) if errores else "No se obtuvieron datos."
+    print(f"[ERROR ACTUALIZACION OFICIAL] {detalle}", flush=True)
+    raise gr.Error(
+        "No fue posible construir una base oficial y no existe una base local para conservar. "
+        f"Detalle: {detalle}"
+    )
 
 def cargar_archivo_efipem(file):
     if file is None:
