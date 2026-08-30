@@ -1,0 +1,16 @@
+﻿Dimensión,Variable,Código,Definición / fórmula,Fuente,Años iniciales,Papel
+Financiera,Autonomía financiera,autonomia_financiera,Ingresos propios / ingresos totales calculados,INEGI EFIPEM,"2010, 2015, 2020",Predictora
+Financiera,Dependencia de transferencias,dependencia_transferencias,Transferencias / ingresos totales calculados,INEGI EFIPEM,"2010, 2015, 2020",Predictora
+Financiera,Ingresos propios,ingresos_propios,Impuestos + derechos + productos + aprovechamientos + otras fuentes propias identificadas,INEGI EFIPEM,"2010, 2015, 2020",Predictora
+Gasto,Servicios personales,g_servicios_personales_pct,Servicios personales / gasto total calculado × 100,INEGI EFIPEM,"2010, 2015, 2020",Decisión
+Gasto,Materiales y suministros,g_materiales_suministros_pct,Materiales y suministros / gasto total calculado × 100,INEGI EFIPEM,"2010, 2015, 2020",Decisión
+Gasto,Servicios generales,g_servicios_generales_pct,Servicios generales / gasto total calculado × 100,INEGI EFIPEM,"2010, 2015, 2020",Decisión
+Gasto,Transferencias y ayudas,g_transferencias_ayudas_pct,"Transferencias, asignaciones, subsidios y ayudas / gasto total calculado × 100",INEGI EFIPEM,"2010, 2015, 2020",Decisión
+Gasto,Bienes muebles e inmuebles,g_bienes_muebles_pct,"Bienes muebles, inmuebles e intangibles / gasto total calculado × 100",INEGI EFIPEM,"2010, 2015, 2020",Decisión
+Gasto,Inversión pública,g_inversion_publica_pct,Inversión pública / gasto total calculado × 100,INEGI EFIPEM,"2010, 2015, 2020",Decisión
+Gasto,Deuda pública,g_deuda_publica_pct,Deuda pública / gasto total calculado × 100,INEGI EFIPEM,"2010, 2015, 2020",Decisión
+Contexto,Población,poblacion,Población municipal disponible en la base social,CONEVAL / fuentes INEGI de origen,"2010, 2015, 2020",Control
+Social,Pobreza,pobreza_pct,Porcentaje de población en situación de pobreza,CONEVAL,"2010, 2015, 2020",Objetivo
+Social,Pobreza extrema,pobreza_extrema_pct,Porcentaje de población en situación de pobreza extrema,CONEVAL,"2010, 2015, 2020",Objetivo
+Social,Carencia de servicios básicos,carencia_servicios_basicos_pct,Porcentaje con carencia por acceso a servicios básicos en la vivienda,CONEVAL,"2010, 2015, 2020",Objetivo
+Social,Rezago educativo,rezago_educativo_pct,Porcentaje con rezago educativo,CONEVAL,"2010, 2015, 2020",Objetivo
