@@ -53,14 +53,35 @@ def cargar_archivo_efipem(file):
     if file is None:
         raise gr.Error("Selecciona un archivo CSV, XLSX o ZIP.")
 
-    p = Path(file)
+    # Gradio puede entregar el archivo como string, Path, objeto con .name
+    # o diccionario, dependiendo de la versión.
+    def _ruta_archivo(obj):
+        if isinstance(obj, (str, Path)):
+            return Path(obj)
+        if isinstance(obj, dict):
+            for k in ("path", "name"):
+                if obj.get(k):
+                    return Path(obj[k])
+        nombre = getattr(obj, "name", None)
+        if nombre:
+            return Path(nombre)
+        raise ValueError(f"No pude interpretar el archivo recibido: {type(obj).__name__}")
 
-    # SIMUP-M 1.1: si el archivo ya es una base maestra municipio-año,
-    # se carga directamente y NO depende de una descarga externa de CONEVAL.
     try:
-        if p.suffix.lower() == ".csv":
-            base_directa = pd.read_csv(p, encoding="utf-8-sig")
-        elif p.suffix.lower() in [".xlsx", ".xls"]:
+        p = _ruta_archivo(file)
+
+        if not p.exists():
+            raise FileNotFoundError(f"El archivo temporal no existe en el servidor: {p}")
+
+        sufijo = p.suffix.lower()
+
+        # 1) Base maestra SIMUP-M: municipio + anio
+        if sufijo == ".csv":
+            try:
+                base_directa = pd.read_csv(p, encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                base_directa = pd.read_csv(p, encoding="latin-1")
+        elif sufijo in (".xlsx", ".xls"):
             base_directa = pd.read_excel(p)
         else:
             base_directa = None
@@ -70,47 +91,67 @@ def cargar_archivo_efipem(file):
                 str(c).strip().lower().replace(" ", "_")
                 for c in base_directa.columns
             ]
+
             if {"municipio", "anio"}.issubset(base_directa.columns):
+                base_directa["municipio"] = base_directa["municipio"].astype(str).str.strip()
                 base_directa["anio"] = pd.to_numeric(base_directa["anio"], errors="coerce")
                 base_directa = base_directa.dropna(subset=["municipio", "anio"]).copy()
+
+                if base_directa.empty:
+                    raise ValueError("La base no contiene filas válidas con municipio y año.")
+
                 base_directa["anio"] = base_directa["anio"].astype(int)
 
                 if "__modo__" not in base_directa.columns:
                     base_directa["__modo__"] = "REAL"
 
-                base_directa.to_csv(
-                    DATA_DIR / "base_maestra_hidalgo.csv",
-                    index=False,
-                    encoding="utf-8-sig"
-                )
+                DATA_DIR.mkdir(parents=True, exist_ok=True)
+                destino = DATA_DIR / "base_maestra_hidalgo.csv"
+                base_directa.to_csv(destino, index=False, encoding="utf-8-sig")
+
                 STATE["base"] = base_directa
                 STATE["modo"] = "DATOS OFICIALES — BASE MAESTRA LOCAL"
                 STATE["fuentes"] = f"Base local cargada: {p.name}"
                 STATE["modelo"] = None
 
-                municipios = sorted(base_directa["municipio"].dropna().astype(str).unique())
-                valor = "Zimapán" if "Zimapán" in municipios else (municipios[0] if municipios else None)
-                return _status(), base_directa.head(50), gr.update(choices=municipios, value=valor)
-    except Exception as e:
-        # Si no es base maestra, intentamos el flujo EFIPEM original.
-        pass
+                municipios = sorted(
+                    base_directa["municipio"].dropna().astype(str).unique().tolist()
+                )
+                valor = "Zimapán" if "Zimapán" in municipios else municipios[0]
 
-    # Flujo original para CSV/ZIP oficial EFIPEM.
-    try:
+                return (
+                    _status(),
+                    base_directa.head(50),
+                    gr.update(choices=municipios, value=valor)
+                )
+
+        # 2) Si no es base maestra, intentar como archivo oficial EFIPEM
         coneval, src_c = descargar_coneval(force=False)
-        efipem = cargar_efipem_desde_archivo(file)
+        efipem = cargar_efipem_desde_archivo(str(p))
         base = construir_base_maestra(efipem, coneval)
         base["__modo__"] = "REAL"
-        base.to_csv(DATA_DIR / "base_maestra_hidalgo.csv", index=False, encoding="utf-8-sig")
+
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        base.to_csv(
+            DATA_DIR / "base_maestra_hidalgo.csv",
+            index=False,
+            encoding="utf-8-sig"
+        )
+
         STATE["base"] = base
         STATE["modo"] = "DATOS OFICIALES"
         STATE["fuentes"] = f"{src_c} | EFIPEM cargado manualmente: {p.name}"
         STATE["modelo"] = None
-        municipios = sorted(base["municipio"].dropna().unique())
-        valor = "Zimapán" if "Zimapán" in municipios else (municipios[0] if municipios else None)
+
+        municipios = sorted(base["municipio"].dropna().astype(str).unique().tolist())
+        valor = "Zimapán" if "Zimapán" in municipios else municipios[0]
+
         return _status(), base.head(50), gr.update(choices=municipios, value=valor)
+
     except Exception as e:
-        raise gr.Error(f"No fue posible cargar el archivo: {e}")
+        # El texto completo se imprime en los logs de Render y también se muestra al usuario.
+        print(f"[ERROR CARGA LOCAL] {type(e).__name__}: {e}", flush=True)
+        raise gr.Error(f"Error al cargar el archivo: {type(e).__name__}: {e}")
 
 def cargar_cache():
     p = DATA_DIR / "base_maestra_hidalgo.csv"
