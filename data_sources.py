@@ -25,34 +25,78 @@ def _get(url, timeout=60):
     return r
 
 def _read_tabular_bytes(name, content):
+    """
+    Lector robusto para archivos oficiales.
+    - CSV/TXT: autodetecta coma, punto y coma, tabulador, etc.
+    - XLS/XLSX: detecta encabezados aunque la hoja tenga títulos arriba.
+    """
     lname = name.lower()
-    if lname.endswith(".csv"):
-        for enc in ("utf-8-sig", "latin1", "utf-8"):
+
+    if lname.endswith((".csv", ".txt")):
+        ultimo = None
+        for enc in ("utf-8-sig", "latin1", "utf-8", "cp1252"):
             try:
-                return pd.read_csv(io.BytesIO(content), encoding=enc, low_memory=False)
-            except Exception:
-                pass
-        return pd.read_csv(io.BytesIO(content), low_memory=False)
+                # sep=None + engine=python detecta automáticamente el delimitador.
+                return pd.read_csv(
+                    io.BytesIO(content),
+                    encoding=enc,
+                    sep=None,
+                    engine="python",
+                    low_memory=False
+                )
+            except Exception as e:
+                ultimo = e
+        raise ValueError(f"No fue posible leer {name}: {ultimo}")
+
     if lname.endswith((".xlsx", ".xls")):
         xls = pd.ExcelFile(io.BytesIO(content))
         frames = []
+
+        claves_header = {
+            "municipio", "nom_mun", "nombre_municipio", "cve_mun",
+            "clave_municipio", "entidad", "entidad_federativa", "cve_ent",
+            "anio", "año", "categoria", "concepto", "valorenpesos",
+            "valor_en_pesos"
+        }
+
         for sh in xls.sheet_names:
             try:
-                d = pd.read_excel(xls, sheet_name=sh)
+                # Primero leemos sin encabezado para localizar la fila real de títulos.
+                preview = pd.read_excel(xls, sheet_name=sh, header=None, nrows=30)
+                mejor_fila = 0
+                mejor_score = -1
+
+                for i in range(len(preview)):
+                    vals = [
+                        normaliza_columna(v)
+                        for v in preview.iloc[i].tolist()
+                        if pd.notna(v)
+                    ]
+                    score = sum(
+                        1 for v in vals
+                        if any(k == v or k in v for k in claves_header)
+                    )
+                    if score > mejor_score:
+                        mejor_score = score
+                        mejor_fila = i
+
+                d = pd.read_excel(xls, sheet_name=sh, header=mejor_fila)
                 d["__hoja__"] = sh
                 frames.append(d)
             except Exception:
                 continue
+
         if not frames:
             raise ValueError(f"No fue posible leer {name}")
         return pd.concat(frames, ignore_index=True, sort=False)
+
     raise ValueError(f"Formato no soportado: {name}")
 
 def _extract_tables_from_zip(content):
     out = []
     with zipfile.ZipFile(io.BytesIO(content)) as z:
         for name in z.namelist():
-            if name.lower().endswith((".csv", ".xlsx", ".xls")) and not name.startswith("__MACOSX"):
+            if name.lower().endswith((".csv", ".txt", ".xlsx", ".xls")) and not name.startswith("__MACOSX"):
                 try:
                     out.append((name, _read_tabular_bytes(name, z.read(name))))
                 except Exception:
@@ -62,128 +106,229 @@ def _extract_tables_from_zip(content):
 def descargar_coneval(force=False):
     cache = DATA_DIR / "coneval_municipal_hidalgo.csv"
     if cache.exists() and not force:
-        return pd.read_csv(cache), f"Cache local: {cache.name}"
+        dcache = pd.read_csv(cache)
+        if {"municipio", "anio"}.issubset(dcache.columns):
+            return dcache, f"Cache local: {cache.name}"
 
     r = _get(CONEVAL_POBREZA_ZIP)
     tablas = _extract_tables_from_zip(r.content)
     if not tablas:
         raise RuntimeError("El ZIP de CONEVAL no contiene tablas legibles.")
 
+    # No elegimos simplemente la tabla con más palabras.
+    # Probamos cada tabla y preferimos aquella que realmente contiene identificación municipal.
     candidatas = []
     for name, df in tablas:
-        d = limpiar_columnas(df)
-        score = 0
-        joined = " ".join(d.columns)
-        for palabra in ["municip", "pobreza", "pobre", "entidad", "clave"]:
-            score += joined.count(palabra)
-        candidatas.append((score, name, d))
+        try:
+            d = limpiar_columnas(df)
+            cols = list(d.columns)
+
+            entidad_col = busca_columna(cols, [
+                "entidad_federativa", "nombre_entidad", "nom_ent", "entidad"
+            ])
+            cve_ent_col = busca_columna(cols, [
+                "cve_ent", "clave_entidad", "clave_de_entidad", "cve_entidad"
+            ])
+            municipio_col = busca_columna(cols, [
+                "municipio", "nombre_municipio", "nom_mun", "nombre_del_municipio"
+            ])
+            cve_mun_col = busca_columna(cols, [
+                "cve_mun", "clave_municipio", "clave_de_municipio",
+                "cve_municipio", "cvegeo"
+            ])
+            anio_col = busca_columna(cols, ["anio", "ano", "año"])
+
+            tiene_municipio = municipio_col is not None or cve_mun_col is not None
+            tiene_entidad = entidad_col is not None or cve_ent_col is not None
+            tiene_anios = (
+                anio_col is not None or
+                any(re.search(r"(2010|2015|2020)", c) for c in cols)
+            )
+            tiene_indicadores = any(
+                k in " ".join(cols)
+                for k in ["pobreza", "rezago", "aliment", "servicios", "salud"]
+            )
+
+            if tiene_municipio and tiene_entidad and tiene_anios and tiene_indicadores:
+                score = (
+                    10 * int(tiene_municipio) +
+                    6 * int(tiene_entidad) +
+                    5 * int(tiene_anios) +
+                    5 * int(tiene_indicadores) +
+                    min(len(d.columns), 50) / 100
+                )
+                candidatas.append((score, name, d))
+        except Exception:
+            continue
+
+    if not candidatas:
+        nombres = ", ".join(name for name, _ in tablas[:10])
+        raise RuntimeError(
+            "CONEVAL: no se encontró una tabla con identificación municipal "
+            f"y años 2010/2015/2020. Archivos examinados: {nombres}"
+        )
+
     candidatas.sort(key=lambda x: x[0], reverse=True)
-    raw = candidatas[0][2]
+    errores = []
 
-    entidad_col = busca_columna(raw.columns, ["entidad_federativa", "entidad", "nom_ent"])
-    cve_ent_col = busca_columna(raw.columns, ["cve_ent", "clave_entidad", "ent"])
-    municipio_col = busca_columna(raw.columns, ["municipio", "nom_mun", "nombre_municipio"])
-    cve_mun_col = busca_columna(raw.columns, ["cve_mun", "clave_municipio", "mun"])
-    anio_col = busca_columna(raw.columns, ["anio", "año"])
+    for _, nombre, raw in candidatas:
+        try:
+            entidad_col = busca_columna(raw.columns, [
+                "entidad_federativa", "nombre_entidad", "nom_ent", "entidad"
+            ])
+            cve_ent_col = busca_columna(raw.columns, [
+                "cve_ent", "clave_entidad", "clave_de_entidad", "cve_entidad"
+            ])
+            municipio_col = busca_columna(raw.columns, [
+                "municipio", "nombre_municipio", "nom_mun", "nombre_del_municipio"
+            ])
+            cve_mun_col = busca_columna(raw.columns, [
+                "cve_mun", "clave_municipio", "clave_de_municipio",
+                "cve_municipio", "cvegeo"
+            ])
+            anio_col = busca_columna(raw.columns, ["anio", "ano", "año"])
 
-    d = raw.copy()
-    mask = pd.Series(True, index=d.index)
-    if cve_ent_col is not None:
-        ce = d[cve_ent_col].astype(str).str.extract(r"(\d+)")[0].str.zfill(2)
-        mask &= ce.eq(CVE_ENTIDAD)
-    elif entidad_col is not None:
-        mask &= d[entidad_col].astype(str).map(normaliza_texto).str.contains("hidalgo", na=False)
+            d = raw.copy()
+            mask = pd.Series(True, index=d.index)
 
-    d = d[mask].copy()
+            if cve_ent_col is not None:
+                ce = (
+                    d[cve_ent_col].astype(str)
+                    .str.extract(r"(\d+)")[0]
+                    .str[:2].str.zfill(2)
+                )
+                mask &= ce.eq(CVE_ENTIDAD)
+            elif entidad_col is not None:
+                mask &= (
+                    d[entidad_col].astype(str)
+                    .map(normaliza_texto)
+                    .str.contains("hidalgo", na=False)
+                )
 
-    if municipio_col is None and cve_mun_col is not None:
-        cm = d[cve_mun_col].astype(str).str.extract(r"(\d+)")[0].str[-3:].str.zfill(3)
-        d["municipio"] = cm.map(MUNICIPIOS_HIDALGO)
-        municipio_col = "municipio"
-    elif municipio_col is not None:
-        d["municipio"] = d[municipio_col].astype(str).str.strip()
-        municipio_col = "municipio"
+            d = d[mask].copy()
+            if d.empty:
+                raise ValueError("La tabla no produjo filas de Hidalgo.")
 
-    if cve_mun_col is not None:
-        d["cve_mun"] = d[cve_mun_col].astype(str).str.extract(r"(\d+)")[0].str[-3:].str.zfill(3)
-    else:
-        inv = {normaliza_texto(v): k for k, v in MUNICIPIOS_HIDALGO.items()}
-        d["cve_mun"] = d["municipio"].map(lambda x: inv.get(normaliza_texto(x)))
+            # Municipio
+            if municipio_col is not None:
+                d["municipio"] = d[municipio_col].astype(str).str.strip()
+            elif cve_mun_col is not None:
+                cm_raw = d[cve_mun_col].astype(str).str.extract(r"(\d+)")[0]
+                # CVEGEO puede ser 5 dígitos (13 + municipio); tomamos los últimos 3.
+                cm = cm_raw.str[-3:].str.zfill(3)
+                d["municipio"] = cm.map(MUNICIPIOS_HIDALGO)
+            else:
+                raise ValueError("La tabla no contiene municipio ni clave municipal.")
 
-    # CONEVAL puede venir en formato ancho (indicadores 2010/2015/2020)
-    # o largo. Normalizamos ambos.
-    if anio_col is not None:
-        d["anio"] = pd.to_numeric(d[anio_col], errors="coerce").astype("Int64")
-        largo = d
-    else:
-        id_cols = [c for c in ["cve_mun", "municipio"] if c in d.columns]
-        rows = []
-        for _, row in d.iterrows():
-            base = {c: row[c] for c in id_cols}
-            por_anio = {a: dict(base, anio=a) for a in ANIOS_SOCIALES}
-            for col in d.columns:
-                m = re.search(r"(2010|2015|2020)", col)
-                if not m:
-                    continue
-                a = int(m.group(1))
-                nuevo = re.sub(r"_?(2010|2015|2020).*", "", col).strip("_")
-                if nuevo:
-                    por_anio[a][nuevo] = row[col]
-            rows.extend(por_anio.values())
-        largo = pd.DataFrame(rows)
+            # Clave municipal
+            if cve_mun_col is not None:
+                d["cve_mun"] = (
+                    d[cve_mun_col].astype(str)
+                    .str.extract(r"(\d+)")[0]
+                    .str[-3:].str.zfill(3)
+                )
+            else:
+                inv = {normaliza_texto(v): k for k, v in MUNICIPIOS_HIDALGO.items()}
+                d["cve_mun"] = d["municipio"].map(
+                    lambda x: inv.get(normaliza_texto(x))
+                )
 
-    largo = limpiar_columnas(largo)
+            d = d[d["municipio"].notna()].copy()
+            if d.empty:
+                raise ValueError("No fue posible mapear municipios de Hidalgo.")
 
-    # Mapeo flexible de indicadores.
-    aliases = {
-        "pobreza_pct": [
-            r"^pobreza$", r"pobreza_porcentaje", r"pobreza_pct",
-            r"porcentaje.*pobreza", r"pobreza.*porc"
-        ],
-        "pobreza_extrema_pct": [
-            r"pobreza_extrema", r"porcentaje.*pobreza_extrema"
-        ],
-        "carencia_servicios_basicos_pct": [
-            r"servicios_basicos", r"carencia.*servicios_basicos"
-        ],
-        "rezago_educativo_pct": [
-            r"rezago_educativo"
-        ],
-        "carencia_salud_pct": [
-            r"acceso.*salud", r"carencia.*salud"
-        ],
-        "carencia_seguridad_social_pct": [
-            r"seguridad_social"
-        ],
-        "carencia_vivienda_pct": [
-            r"calidad.*espacios.*vivienda", r"carencia.*vivienda"
-        ],
-        "carencia_alimentacion_pct": [
-            r"aliment", r"carencia.*aliment"
-        ],
-        "poblacion": [
-            r"poblacion_total", r"pobtot", r"poblacion"
-        ]
-    }
+            # Formato largo/ancho
+            if anio_col is not None:
+                d["anio"] = pd.to_numeric(d[anio_col], errors="coerce").astype("Int64")
+                largo = d
+            else:
+                id_cols = [c for c in ["cve_mun", "municipio"] if c in d.columns]
+                rows = []
+                for _, row in d.iterrows():
+                    base_id = {c: row[c] for c in id_cols}
+                    por_anio = {a: dict(base_id, anio=a) for a in ANIOS_SOCIALES}
+                    for col in d.columns:
+                        m = re.search(r"(2010|2015|2020)", col)
+                        if not m:
+                            continue
+                        a = int(m.group(1))
+                        nuevo = re.sub(r"_?(2010|2015|2020).*", "", col).strip("_")
+                        if nuevo:
+                            por_anio[a][nuevo] = row[col]
+                    rows.extend(por_anio.values())
+                largo = pd.DataFrame(rows)
 
-    final = largo[[c for c in ["cve_mun","municipio","anio"] if c in largo.columns]].copy()
-    for nuevo, pats in aliases.items():
-        encontrado = None
-        for c in largo.columns:
-            nc = normaliza_texto(c).replace(" ", "_")
-            if any(re.search(p, nc) for p in pats):
-                # Evita columnas de número de personas cuando buscamos porcentaje.
-                if nuevo.endswith("_pct") and any(k in nc for k in ["personas", "poblacion_", "numero"]):
-                    continue
-                encontrado = c
-                break
-        if encontrado:
-            final[nuevo] = a_numero(largo[encontrado])
+            largo = limpiar_columnas(largo)
 
-    final = final[final["anio"].isin(ANIOS_SOCIALES)].copy()
-    final = final.dropna(subset=["municipio", "anio"]).drop_duplicates(["municipio","anio"])
-    final.to_csv(cache, index=False, encoding="utf-8-sig")
-    return final, "CONEVAL: Medición de pobreza municipal 2010, 2015 y 2020"
+            aliases = {
+                "pobreza_pct": [
+                    r"^pobreza$", r"pobreza_porcentaje", r"pobreza_pct",
+                    r"porcentaje.*pobreza", r"pobreza.*porc"
+                ],
+                "pobreza_extrema_pct": [
+                    r"pobreza_extrema", r"porcentaje.*pobreza_extrema"
+                ],
+                "carencia_servicios_basicos_pct": [
+                    r"servicios_basicos", r"carencia.*servicios_basicos"
+                ],
+                "rezago_educativo_pct": [r"rezago_educativo"],
+                "carencia_salud_pct": [
+                    r"acceso.*salud", r"carencia.*salud"
+                ],
+                "carencia_seguridad_social_pct": [r"seguridad_social"],
+                "carencia_vivienda_pct": [
+                    r"calidad.*espacios.*vivienda", r"carencia.*vivienda"
+                ],
+                "carencia_alimentacion_pct": [
+                    r"aliment", r"carencia.*aliment"
+                ],
+                "poblacion": [
+                    r"poblacion_total", r"pobtot", r"poblacion"
+                ]
+            }
+
+            final = largo[
+                [c for c in ["cve_mun", "municipio", "anio"] if c in largo.columns]
+            ].copy()
+
+            if not {"municipio", "anio"}.issubset(final.columns):
+                raise ValueError("La tabla normalizada no contiene municipio y año.")
+
+            for nuevo, pats in aliases.items():
+                encontrado = None
+                for c in largo.columns:
+                    nc = normaliza_texto(c).replace(" ", "_")
+                    if any(re.search(p, nc) for p in pats):
+                        if nuevo.endswith("_pct") and any(
+                            k in nc for k in ["personas", "poblacion_", "numero"]
+                        ):
+                            continue
+                        encontrado = c
+                        break
+                if encontrado:
+                    final[nuevo] = a_numero(largo[encontrado])
+
+            final["anio"] = pd.to_numeric(final["anio"], errors="coerce").astype("Int64")
+            final = final[final["anio"].isin(ANIOS_SOCIALES)].copy()
+            final = final.dropna(subset=["municipio", "anio"])
+            final = final.drop_duplicates(["municipio", "anio"])
+
+            if final.empty:
+                raise ValueError("La tabla final quedó vacía.")
+
+            final.to_csv(cache, index=False, encoding="utf-8-sig")
+            return (
+                final,
+                f"CONEVAL: Medición de pobreza municipal 2010, 2015 y 2020 ({nombre})"
+            )
+
+        except Exception as e:
+            errores.append(f"{nombre}: {type(e).__name__}: {e}")
+
+    raise RuntimeError(
+        "CONEVAL: se encontraron tablas candidatas, pero ninguna pudo normalizarse. "
+        + " | ".join(errores[:5])
+    )
 
 def _links_in_page(url):
     html = _get(url).text
@@ -199,17 +344,33 @@ def _links_in_page(url):
 def descubrir_url_efipem():
     links = _links_in_page(INEGI_EFIPEM_LANDING)
     candidatos = []
+
     for u in links:
         lu = u.lower()
-        if any(ext in lu for ext in [".zip", ".csv"]) and any(k in lu for k in ["finanz", "efipem", "municip"]):
-            score = 0
-            score += 4 if "municip" in lu else 0
-            score += 2 if "efipem" in lu or "finanz" in lu else 0
-            score += 1 if ".zip" in lu else 0
+        if not any(ext in lu for ext in [".zip", ".csv", ".txt"]):
+            continue
+
+        score = 0
+        if "municip" in lu:
+            score += 10
+        if "efipem" in lu or "finanz" in lu:
+            score += 7
+        if "datos" in lu or "descarga" in lu:
+            score += 2
+        if ".zip" in lu:
+            score += 2
+
+        # Penalizar enlaces claramente ajenos al archivo municipal.
+        if any(k in lu for k in ["estatal", "alcaldia", "trimestral"]):
+            score -= 6
+
+        if score > 0:
             candidatos.append((score, u))
+
     if not candidatos:
         return None
-    candidatos.sort(reverse=True)
+
+    candidatos.sort(key=lambda x: x[0], reverse=True)
     return candidatos[0][1]
 
 def cargar_efipem_desde_archivo(path):
@@ -255,24 +416,100 @@ def descargar_efipem(force=False, url_directa=None):
 def normalizar_efipem(raw):
     d = limpiar_columnas(raw)
 
-    anio = busca_columna(d.columns, ["anio"], obligatoria=True)
-    entidad = busca_columna(d.columns, ["entidad"], obligatoria=True)
-    municipio = busca_columna(d.columns, ["municipio"], obligatoria=True)
-    categoria = busca_columna(d.columns, ["categoria"], obligatoria=True)
-    concepto = busca_columna(d.columns, ["concepto"], obligatoria=True)
-    valor = busca_columna(d.columns, ["valorenpesos", "valor_en_pesos", "valor"], obligatoria=True)
+    # Si llegó un archivo de una sola columna, casi siempre hubo un delimitador no detectado.
+    if len(d.columns) <= 1:
+        raise ValueError(
+            f"EFIPEM: el archivo quedó con {len(d.columns)} columna(s). "
+            "Probablemente usa un delimitador no reconocido."
+        )
+
+    anio = busca_columna(d.columns, ["anio", "ano", "año"], obligatoria=True)
+
+    entidad = busca_columna(d.columns, [
+        "entidad", "entidad_federativa", "nombre_entidad", "nom_ent"
+    ])
+    cve_ent = busca_columna(d.columns, [
+        "cve_ent", "clave_entidad", "id_entidad", "cve_entidad"
+    ])
+
+    municipio = busca_columna(d.columns, [
+        "municipio", "nombre_municipio", "nom_mun"
+    ])
+    cve_mun = busca_columna(d.columns, [
+        "cve_mun", "clave_municipio", "id_municipio", "cve_municipio"
+    ])
+    cvegeo = busca_columna(d.columns, ["cvegeo", "cve_geo"])
+
+    categoria = busca_columna(d.columns, [
+        "categoria", "categoría", "nivel", "tipo"
+    ], obligatoria=True)
+    concepto = busca_columna(d.columns, [
+        "concepto", "descripcion_concepto", "descripcion"
+    ], obligatoria=True)
+    valor = busca_columna(d.columns, [
+        "valorenpesos", "valor_en_pesos", "valor", "monto"
+    ], obligatoria=True)
+
+    # Entidad: usar nombre si existe; si no, filtrar con clave 13.
+    if entidad is not None:
+        serie_entidad = d[entidad].astype(str).str.strip()
+        mask_hgo = serie_entidad.map(normaliza_texto).str.contains("hidalgo", na=False)
+    elif cve_ent is not None:
+        ce = d[cve_ent].astype(str).str.extract(r"(\d+)")[0].str[:2].str.zfill(2)
+        serie_entidad = pd.Series("Hidalgo", index=d.index)
+        mask_hgo = ce.eq(CVE_ENTIDAD)
+    elif cvegeo is not None:
+        cg = d[cvegeo].astype(str).str.extract(r"(\d+)")[0].str.zfill(5)
+        serie_entidad = pd.Series("Hidalgo", index=d.index)
+        mask_hgo = cg.str[:2].eq(CVE_ENTIDAD)
+    else:
+        raise ValueError(
+            "EFIPEM: no se encontró nombre ni clave de entidad "
+            f"(columnas recibidas: {list(d.columns)[:20]})."
+        )
+
+    # Municipio: usar nombre si existe; si no, mapear la clave INEGI.
+    if municipio is not None:
+        serie_municipio = d[municipio].astype(str).str.strip()
+    else:
+        clave_m = None
+        if cve_mun is not None:
+            clave_m = (
+                d[cve_mun].astype(str)
+                .str.extract(r"(\d+)")[0]
+                .str[-3:].str.zfill(3)
+            )
+        elif cvegeo is not None:
+            clave_m = (
+                d[cvegeo].astype(str)
+                .str.extract(r"(\d+)")[0]
+                .str[-3:].str.zfill(3)
+            )
+
+        if clave_m is None:
+            raise ValueError(
+                "EFIPEM: no se encontró nombre ni clave municipal "
+                f"(columnas recibidas: {list(d.columns)[:20]})."
+            )
+        serie_municipio = clave_m.map(MUNICIPIOS_HIDALGO)
 
     out = pd.DataFrame({
         "anio": pd.to_numeric(d[anio], errors="coerce").astype("Int64"),
-        "entidad": d[entidad].astype(str).str.strip(),
-        "municipio": d[municipio].astype(str).str.strip(),
+        "entidad": serie_entidad,
+        "municipio": serie_municipio,
         "categoria": d[categoria].astype(str).str.strip(),
         "concepto": d[concepto].astype(str).str.strip(),
         "valor": a_numero(d[valor])
     })
 
-    out = out[out["entidad"].map(normaliza_texto).str.contains("hidalgo", na=False)].copy()
-    out = out.dropna(subset=["anio","municipio","concepto","valor"])
+    out = out[mask_hgo].copy()
+    out = out.dropna(subset=["anio", "municipio", "concepto", "valor"])
+
+    if out.empty:
+        raise ValueError(
+            "EFIPEM: el archivo fue reconocido, pero no produjo registros válidos de Hidalgo."
+        )
+
     return out
 
 CAPITULOS_INGRESO = {
