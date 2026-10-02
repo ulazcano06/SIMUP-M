@@ -1,80 +1,32 @@
-# SIMUP-M 1.0
-## Sistema de Simulación de Política Pública Municipal
+# SIMUP-M V0.2
+Sistema de Simulación para la Gestión Pública Municipal — prototipo académico para Hidalgo.
 
-Versión inicial enfocada en los 84 municipios de Hidalgo.
+## Qué incluye
+- Interfaz web Gradio.
+- Carga de CSV/XLSX.
+- Modo demo sintético (solo pruebas).
+- Diagnóstico municipal.
+- Captura y evaluación de una propuesta.
+- Semáforo multidimensional: educación, desarrollo, finanzas, cobertura y sostenibilidad.
+- IEE prototipo y comparación de línea base vs. escenario.
 
-## Funciones
-- Integración de INEGI EFIPEM + CONEVAL.
-- Tabla maestra municipio-año.
-- Diagnóstico financiero.
-- Gráficas interactivas.
-- Modelo predictivo exploratorio.
-- Simulación Monte Carlo.
-- Optimización presupuestaria restringida.
-- Aplicación web con Gradio.
-
-## Instalación local
-
-```bash
-python -m venv .venv
-```
-
-Windows:
-```bash
-.venv\Scripts\activate
-```
-
-macOS/Linux:
-```bash
-source .venv/bin/activate
-```
-
+## Ejecutar localmente
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
+Abrir http://127.0.0.1:7860
 
-## Hugging Face Spaces (Gradio)
-1. Crear una cuenta en Hugging Face.
-2. Crear un Space nuevo.
-3. Elegir SDK: **Gradio**.
-4. Subir todos los archivos de esta carpeta.
-5. El archivo principal es `app.py`.
-6. El Space instalará automáticamente `requirements.txt`.
+## Render
+- Runtime: Python
+- Build command: `pip install -r requirements.txt`
+- Start command: `python app.py`
 
-## Datos oficiales
-### CONEVAL
-La app intenta descargar automáticamente el archivo:
-`Concentrado_indicadores_de_pobreza_2020.zip`.
+## Hugging Face Spaces
+Crear un Space con SDK Gradio y subir todos los archivos. `app.py` es el archivo principal.
 
-### INEGI EFIPEM
-La app intenta descubrir el enlace de datos abiertos desde la página oficial. Como la estructura web del INEGI puede cambiar, se incluye una segunda vía:
-- descargar el archivo municipal CSV/ZIP desde **EFIPEM > Datos abiertos**;
-- cargarlo en la pestaña **Datos**.
+## Advertencia metodológica
+V0.2 es un demostrador de arquitectura. Los datos de `demo.py` son sintéticos. Los umbrales del semáforo y los pesos iguales del IEE son provisionales y NO deben usarse como evidencia de tesis ni para decisiones públicas. La siguiente fase debe reemplazar estas reglas con criterios validados y datos oficiales.
 
-No se debe sustituir la fuente oficial por el modo demo.
-
-## Modo demo
-`demo.py` genera datos sintéticos únicamente para:
-- comprobar que Gradio abre;
-- probar gráficas;
-- probar entrenamiento;
-- probar Monte Carlo;
-- probar optimización.
-
-**Nunca deben utilizarse esos valores en tesis, artículos, informes o decisiones públicas.**
-
-## Diseño metodológico de V1
-El modelo es correlacional-predictivo. No es causal.
-
-El optimizador minimiza el indicador social seleccionado dentro de una función predictiva, manteniendo constante la suma de las categorías de gasto controladas y limitando las variaciones.
-
-## Archivos
-- `app.py`: interfaz Gradio.
-- `config.py`: configuración y fuentes.
-- `data_sources.py`: descarga, extracción, limpieza e integración.
-- `modeling.py`: entrenamiento, Monte Carlo y optimización.
-- `municipios.py`: catálogo de los 84 municipios.
-- `utils.py`: utilidades.
-- `demo.py`: datos sintéticos de prueba.
-- `data/catalogo_variables.csv`: matriz inicial de variables.
+## Columnas recomendadas para una base real
+`cve_mun, municipio, anio, poblacion, rezago_educativo_pct, escolaridad_anios, analfabetismo_pct, cobertura_educativa_pct, pobreza_pct, pobreza_extrema_pct, rezago_social_indice, ingresos_municipales, ingresos_propios, gasto_publico, inversion_publica`

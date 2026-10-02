@@ -1,45 +1,10 @@
-import numpy as np
-import pandas as pd
+import numpy as np, pandas as pd
 from municipios import MUNICIPIOS_HIDALGO
-from config import RANDOM_STATE
 
-def crear_demo():
-    """
-    Datos SINTÉTICOS. Sólo sirven para probar la interfaz sin internet.
-    Nunca deben usarse como evidencia de tesis.
-    """
-    rng = np.random.default_rng(RANDOM_STATE)
-    rows = []
-    for year in [2010, 2015, 2020]:
-        for cve, mun in MUNICIPIOS_HIDALGO.items():
-            pob = int(rng.lognormal(10.1, 0.7))
-            autonomia = np.clip(rng.beta(2, 8), .02, .55)
-            dep = np.clip(.90 - autonomia + rng.normal(0,.04), .25, .97)
-            shares = rng.dirichlet([3.5,1.4,2.0,1.8,0.8,2.5,0.7])*100
-            pobreza = np.clip(78 - 38*autonomia - .10*shares[5] + rng.normal(0,8), 15, 95)
-            extrema = np.clip(pobreza*.22 + rng.normal(0,3), 1, 45)
-            servicios = np.clip(pobreza*.55 + rng.normal(0,7), 2, 85)
-            rezago = np.clip(pobreza*.28 + rng.normal(0,4), 2, 45)
-            rows.append({
-                "cve_mun": cve, "municipio":mun, "anio":year,
-                "poblacion":pob, "log_poblacion":np.log1p(pob),
-                "autonomia_financiera":autonomia,
-                "dependencia_transferencias":dep,
-                "ingresos_propios": autonomia*150_000_000,
-                "transferencias_total": dep*150_000_000,
-                "ingresos_totales_calc":150_000_000,
-                "gasto_total_calc":145_000_000,
-                "g_servicios_personales_pct":shares[0],
-                "g_materiales_suministros_pct":shares[1],
-                "g_servicios_generales_pct":shares[2],
-                "g_transferencias_ayudas_pct":shares[3],
-                "g_bienes_muebles_pct":shares[4],
-                "g_inversion_publica_pct":shares[5],
-                "g_deuda_publica_pct":shares[6],
-                "pobreza_pct":pobreza,
-                "pobreza_extrema_pct":extrema,
-                "carencia_servicios_basicos_pct":servicios,
-                "rezago_educativo_pct":rezago,
-                "__modo__":"DEMO SINTÉTICO"
-            })
+def crear_demo(seed=42):
+    rng=np.random.default_rng(seed); rows=[]
+    for i,m in enumerate(MUNICIPIOS_HIDALGO):
+        pob=int(rng.integers(5000,300000)); rez=float(rng.uniform(12,38)); esc=float(rng.uniform(5.5,11.5))
+        pobreza=float(np.clip(25+1.15*rez-2.2*(esc-7)+rng.normal(0,8),12,88))
+        rows.append(dict(cve_mun=f"13{i+1:03d}",municipio=m,anio=2020,poblacion=pob,rezago_educativo_pct=round(rez,2),escolaridad_anios=round(esc,2),analfabetismo_pct=round(rng.uniform(2,22),2),cobertura_educativa_pct=round(rng.uniform(55,96),2),pobreza_pct=round(pobreza,2),pobreza_extrema_pct=round(max(2,pobreza*rng.uniform(.08,.35)),2),rezago_social_indice=round(rng.normal(0,1),3),ingresos_municipales=round(pob*rng.uniform(3500,9000),2),ingresos_propios=round(pob*rng.uniform(250,1800),2),gasto_publico=round(pob*rng.uniform(3200,8500),2),inversion_publica=round(pob*rng.uniform(350,2400),2),__modo__="DEMO SINTÉTICO"))
     return pd.DataFrame(rows)
